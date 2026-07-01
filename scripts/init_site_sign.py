@@ -15,6 +15,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--site-name", required=True, help="站点文件名基名，例如 nodeseek 或 right")
     parser.add_argument("--site-title", help="站点展示名，默认等于 site-name")
     parser.add_argument("--mode", required=True, choices=["httpx", "nodriver"], help="脚本模式")
+    parser.add_argument(
+        "--risk-profile",
+        default="standard",
+        choices=["standard", "high"],
+        help="站点风控等级；high 表示登录前后可能存在 WAF / 风控验证码 / 浏览器态 API",
+    )
     parser.add_argument("--env-prefix", required=True, help="环境变量前缀，例如 NS 或 RIGHT")
     parser.add_argument("--base-url", default="https://example.com", help="站点基础 URL")
     parser.add_argument("--home-path", default="/", help="首页或权威页路径")
@@ -53,6 +59,25 @@ def build_output_path(output_dir: Path, site_name: str, mode: str) -> Path:
     return output_dir / f"{site_name}{suffix}"
 
 
+def print_post_generation_hints(args, output_path: Path, env_prefix: str):
+    """输出生成后的后续动作提示，减少首次建站时遗漏关键步骤。"""
+    print(f"已生成脚本: {output_path}")
+    if args.mode != "nodriver":
+        return
+
+    print("建议后续动作：")
+    print("1. 先补齐权威成功判据：已登录标记、未登录标记、已签到标记。")
+    print("2. 登录/签到若命中浏览器风控，优先保持浏览器态 fetch，不要贸然退化成 httpx。")
+    print("3. 先实现动作前权威状态、动作执行、动作后权威状态三段闭环。")
+    print("4. 若站点存在 WAF / 极验 / 点选，先落盘截图、trace、overlay，再调 offset。")
+    if args.risk_profile == "high":
+        print("5. 当前选择的是 high 风控模式：")
+        print(f"   - 推荐启用 {env_prefix}_KEEP_DEBUG=true")
+        print(f"   - 推荐启用 {env_prefix}_DEBUG_RETENTION_DAYS=7")
+        print(f"   - 推荐启用 {env_prefix}_LOGIN_WAIT_SECONDS=120")
+        print("   - 优先实现登录页就绪判断、验证码成功快照、浏览器态/API 双重复核。")
+
+
 def main():
     """命令行入口。"""
     parser = build_parser()
@@ -72,6 +97,7 @@ def main():
         "SITE_NAME": site_name,
         "SITE_TITLE": site_title,
         "ENV_PREFIX": env_prefix,
+        "ENV_PREFIX_LOWER": env_prefix.lower(),
         "BASE_URL": args.base_url.rstrip("/"),
         "HOME_PATH": args.home_path if args.home_path.startswith("/") else f"/{args.home_path}",
         "SIGN_PATH": args.sign_path if args.sign_path.startswith("/") else f"/{args.sign_path}",
@@ -84,7 +110,7 @@ def main():
 
     output_path = build_output_path(output_dir, site_name, args.mode)
     output_path.write_text(content, encoding="utf-8")
-    print(f"已生成脚本: {output_path}")
+    print_post_generation_hints(args, output_path, env_prefix)
 
 
 if __name__ == "__main__":
