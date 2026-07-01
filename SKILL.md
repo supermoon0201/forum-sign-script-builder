@@ -78,6 +78,7 @@ description: Build or extend forum/community daily sign-in scripts in Python for
 - 如果站点是 Turnstile + JSON API + Bearer Token 组合，额外看 `references/turnstile-sites.md`
 - 如果站点是 **可见 Turnstile 复选框 + hidden input 回填 + 视觉点击不稳定 + 会弹 Cloudflare 错误遮罩**，额外看 `references/turnstile-visual-recovery.md`
 - 如果站点是 **登录前 WAF / Probe，登录后再触发极验或点选，最终业务走 App API**，额外看 `references/browser-risk-sites.md`
+- 如果准备使用 `scripts/init_site_sign.py --preset ...` 生成脚本，落地前额外看 `references/preset-playbooks.md`
 
 ### 3. 成功判断必须保守
 
