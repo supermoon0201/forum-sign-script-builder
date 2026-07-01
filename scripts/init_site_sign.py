@@ -57,6 +57,142 @@ PRESET_CONFIGS = {
 }
 
 
+def build_inline_comment_replacement(lines: list[str], continuation_prefix: str) -> str:
+    """生成适用于“已有注释前缀”的占位替换文本。"""
+    if not lines:
+        return ""
+    head = lines[0]
+    tail = "".join(f"\n{continuation_prefix}{line}" for line in lines[1:])
+    return head + tail
+
+
+def build_preset_replacements(preset_name: str) -> dict[str, str]:
+    """为不同 preset 生成模板注释骨架。"""
+    preset = PRESET_CONFIGS[preset_name]
+    base = {
+        "PRESET_GUIDE": build_inline_comment_replacement(
+            [
+                f"当前生成预设：{preset_name}",
+                f"描述：{preset['description']}",
+                *[f"提示：{hint}" for hint in preset["hints"]],
+            ],
+            "# ",
+        ),
+        "LOGIN_IMPL_GUIDE": build_inline_comment_replacement(
+            [
+                "按站点真实前端接口或登录表单实现。",
+                "先验证登录页 DOM 是否就绪，再填写表单或发 AJAX 登录。",
+            ],
+            "    # ",
+        ),
+        "RISK_IMPL_GUIDE": build_inline_comment_replacement(
+            [
+                "若站点登录后出现验证码，在这里集中处理。",
+                "推荐落盘 screenshot / trace / overlay / success snapshot。",
+            ],
+            "    # ",
+        ),
+        "API_VERIFY_GUIDE": build_inline_comment_replacement(
+            [
+                "若站点最终业务走 JSON API / App API，在这里单独复核登录态。",
+            ],
+            "    # ",
+        ),
+        "SIGN_IMPL_GUIDE": build_inline_comment_replacement(
+            [
+                "把真正的签到动作实现放在这里，并返回结构化结果。",
+                "至少区分：new_sign / already / failed。",
+            ],
+            "    # ",
+        ),
+    }
+
+    if preset_name == "browser-risk":
+        base.update(
+            {
+                "LOGIN_IMPL_GUIDE": build_inline_comment_replacement(
+                    [
+                        "高风控站点优先保留浏览器态登录链路。",
+                        "先处理登录前 WAF / Probe，再确认登录页 DOM 就绪。",
+                        "若登录接口返回 risk_level2_3 / risk_level2_4，在 open_login_risk_challenge() 里统一处理。",
+                    ],
+                    "    # ",
+                ),
+                "RISK_IMPL_GUIDE": build_inline_comment_replacement(
+                    [
+                        "这里优先处理 WAF 后的登录极验 / 点选 / 短信二次验证。",
+                        "对滑块题保留 bg/full/mask/overlay/trace；对点选题保留 panel/grid/manifest。",
+                        "验证码成功后固化 success snapshot，避免下次从零猜。",
+                    ],
+                    "    # ",
+                ),
+                "API_VERIFY_GUIDE": build_inline_comment_replacement(
+                    [
+                        "高风控站点默认要做浏览器态 + API 双重复核。",
+                        "例如先验证用户页已登录，再验证 /api/user/info 或 App API 是否返回真实用户信息。",
+                    ],
+                    "    # ",
+                ),
+                "SIGN_IMPL_GUIDE": build_inline_comment_replacement(
+                    [
+                        "若签到和任务走 App API，优先 browser_fetch() 调接口，再用权威状态接口复核。",
+                        "任务列表为空时不要误判失败；已签到与本次新签到成功要分开输出。",
+                    ],
+                    "    # ",
+                ),
+            }
+        )
+    elif preset_name == "turnstile-json-api":
+        base.update(
+            {
+                "LOGIN_IMPL_GUIDE": build_inline_comment_replacement(
+                    [
+                        "优先读公开验证配置接口拿 siteKey，再渲染自定义 Turnstile 组件。",
+                        "登录动作尽量走 browser_fetch()，复用 Cookie / Storage / 同源环境。",
+                    ],
+                    "    # ",
+                ),
+                "RISK_IMPL_GUIDE": build_inline_comment_replacement(
+                    [
+                        "若 Turnstile 之外还有二次验证码，在这里统一扩展。",
+                    ],
+                    "    # ",
+                ),
+            }
+        )
+    elif preset_name == "cookie-cloudflare":
+        base.update(
+            {
+                "LOGIN_IMPL_GUIDE": build_inline_comment_replacement(
+                    [
+                        "这个预设通常不优先实现账号密码登录，而是优先注入 Cookie 后访问权威页复核。",
+                    ],
+                    "    # ",
+                ),
+                "RISK_IMPL_GUIDE": build_inline_comment_replacement(
+                    [
+                        "若 Cookie 态下仍遇到浏览器放行页，在这里补充 Cloudflare/WAF 恢复逻辑。",
+                    ],
+                    "    # ",
+                ),
+            }
+        )
+    elif preset_name == "simple-httpx":
+        base.update(
+            {
+                "PRESET_GUIDE": build_inline_comment_replacement(
+                    [
+                        f"当前生成预设：{preset_name}",
+                        f"描述：{preset['description']}",
+                        "说明：当前若仍选择 nodriver，通常意味着你需要浏览器态观测或后续可能回退到 httpx。",
+                    ],
+                    "# ",
+                ),
+            }
+        )
+    return base
+
+
 def build_parser() -> argparse.ArgumentParser:
     """构建命令行参数解析器。"""
     parser = argparse.ArgumentParser(description="生成论坛签到脚本骨架")
@@ -177,6 +313,7 @@ def main():
         "LOGIN_OK_MARKER": "个人中心",
         "ALREADY_SIGNED_MARKER": "今日已签到",
     }
+    replacements.update(build_preset_replacements(args.preset))
     content = render_template(template, replacements)
 
     output_path = build_output_path(output_dir, site_name, args.mode)

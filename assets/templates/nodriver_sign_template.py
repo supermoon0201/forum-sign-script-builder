@@ -61,6 +61,9 @@ DEFAULT_CHROME_PATHS = [
     r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
 ]
 
+# ----------------------------- 预设模式提示 -----------------------------
+# {{PRESET_GUIDE}}
+
 
 # ----------------------------- 辅助函数 -----------------------------
 class CDPEnumDuck:
@@ -642,6 +645,7 @@ async def is_logged_in(tab) -> bool:
 
 async def login_with_credentials(tab, username: str, password: str) -> Tuple[bool, str]:
     """用户名密码登录占位函数。"""
+    # {{LOGIN_IMPL_GUIDE}}
     # 中文注释：如果站点是 Turnstile + JSON API 型，这里优先：
     # 1. 读验证配置接口拿 siteKey
     # 2. solve_turnstile_token()
@@ -653,6 +657,7 @@ async def login_with_credentials(tab, username: str, password: str) -> Tuple[boo
 
 async def open_login_risk_challenge(tab, runtime: RuntimeContext) -> Dict:
     """登录风控挑战占位函数，返回挑战场景摘要。"""
+    # {{RISK_IMPL_GUIDE}}
     # 中文注释：推荐在这里统一处理：
     # - WAF / Probe 放行后登录页是否就绪
     # - risk_level2_3 / risk_level2_4 / 点选 / 短信
@@ -668,6 +673,7 @@ async def verify_browser_session(tab) -> Dict:
 
 async def verify_api_session(tab) -> Dict:
     """业务 API 登录复核占位函数。"""
+    # {{API_VERIFY_GUIDE}}
     # 中文注释：若站点最终业务走 App API / JSON API，必须单独复核，而不是只看页面已登录。
     return {"ok": False, "summary": "待按站点实现"}
 
@@ -736,6 +742,7 @@ async def fetch_authoritative_status(tab) -> Dict:
 
 async def execute_sign_action(tab) -> Dict:
     """真正执行签到动作占位函数。"""
+    # {{SIGN_IMPL_GUIDE}}
     # 中文注释：推荐返回结构化结果，而不是只有 True/False。
     return {"ok": False, "already": False, "new_sign": False, "message": "待按站点实现"}
 
