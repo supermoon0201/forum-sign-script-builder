@@ -77,6 +77,7 @@ description: Build or extend forum/community daily sign-in scripts in Python for
 - 遇到页面乱码、动态表单字段、奖励金额提取、验证码重试等问题时，读 `references/debugging-sign-pages.md`
 - 如果站点是 Turnstile + JSON API + Bearer Token 组合，额外看 `references/turnstile-sites.md`
 - 如果站点是 **可见 Turnstile 复选框 + hidden input 回填 + 视觉点击不稳定 + 会弹 Cloudflare 错误遮罩**，额外看 `references/turnstile-visual-recovery.md`
+- 如果站点是 **登录前 WAF / Probe，登录后再触发极验或点选，最终业务走 App API**，额外看 `references/browser-risk-sites.md`
 
 ### 3. 成功判断必须保守
 
@@ -130,6 +131,10 @@ description: Build or extend forum/community daily sign-in scripts in Python for
 - 状态机要处理“验证码 DOM 消失即已放行”的情况：每轮采样前、采样失败后、刷新后都先检查是否已离开验证页；不要因为拿不到旧 DOM 或旧 cookie 就误报失败。
 - 对需要长期定时运行的脚本，默认不要无限保留中间图。提供 `KEEP_DEBUG` 与保留天数：调试时完整落盘，日常运行使用 runtime 临时目录并清理旧文件。
 - 若目标是青龙/单文件部署，调通后把运行时 solver 合并进主脚本，避免部署时漏带 `research/` 辅助模块；研究脚本可以保留为备份，但正式脚本不要依赖它。
+- 对 **前置 WAF + 登录极验** 的站点，必须把“WAF 已放行”和“登录验证码已通过”当成两个独立状态机；WAF 通过后先验证登录页 DOM 是否就绪，再开始填表单或发登录 AJAX。
+- 对 **腾讯平移滑块**，优先尝试确定性精确拖动；先追求 `delta` 命中率，再考虑人类化轨迹。若随机抖动降低命中率，就默认关闭大幅随机扰动。
+- 对 **登录极验 `risk_level2_3`**，若事件探针显示 `downs=1 / drag_moves>0 / ups=1`，但服务端稳定返回 `error_113` / `forbidden`，优先把它判成风控拒绝而不是纯偏移问题；这时不要盲目枚举大量 offset。
+- 对 **登录验证码成功后还要调业务 API** 的站点，必须保存成功样本和回填参数快照，例如 challenge/validate/seccode、成功后页面状态、成功后 AJAX 返回；后续优先复用成功样本而不是重新猜策略。
 
 ### 5. 前端接口勘察规则
 
@@ -185,6 +190,14 @@ description: Build or extend forum/community daily sign-in scripts in Python for
 
 - 账号密码 + 图形验证码站点，默认至少支持有限次重试（如 2~3 次），每次重试都要重新获取登录页字段和新验证码，不能重复提交旧 `once` 或旧验证码答案。
 - 验证码识别失败时，日志里要区分“字段解析失败”“验证码识别失败”“登录提交后校验未通过”三种阶段，避免把所有失败都归类为“登录失败”。
+- 若验证码体系包含 **WAF 放行页 → 登录极验 → 业务 API** 三段链路，日志必须明确分段输出，至少区分：
+  - `waf-not-passed`
+  - `login-page-not-ready`
+  - `risk-challenge-opened`
+  - `risk-challenge-forbidden`
+  - `ajax-login-success`
+  - `api-checkin-success`
+- 若登录滑块是浏览器端 canvas 差分题，默认保存 `bg/full/mask/overlay/trace` 五类调试产物，再允许继续调 offset；没有这些调试图时，不要盲改轨迹。
 
 ## 资源使用
 
