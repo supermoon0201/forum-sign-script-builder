@@ -20,10 +20,15 @@ CHROMIUM_PATH            可选，Chromium/Chrome 可执行文件路径
 BARK_URL                 可选，Bark 推送地址
 """
 import asyncio
+import base64
+import datetime as dt
 import json
 import os
+import pathlib
 import random
+import shutil
 import socket
+import time
 import urllib.parse
 import urllib.request
 from typing import Dict, List, Optional, Tuple
@@ -42,6 +47,10 @@ PASSWORD_STR = os.getenv("{{ENV_PREFIX}}_PASSWORD", "")
 HEADLESS = os.getenv("{{ENV_PREFIX}}_HEADLESS", "false").lower() == "true"
 BARK_URL = os.getenv("BARK_URL", "")
 CHROMIUM_PATH = os.getenv("CHROMIUM_PATH", "").strip()
+KEEP_DEBUG = os.getenv("{{ENV_PREFIX}}_KEEP_DEBUG", "false").strip().lower() == "true"
+DEBUG_RETENTION_DAYS = int(os.getenv("{{ENV_PREFIX}}_DEBUG_RETENTION_DAYS", "7") or "7")
+LOGIN_WAIT_SECONDS = int(os.getenv("{{ENV_PREFIX}}_LOGIN_WAIT_SECONDS", "120") or "120")
+DO_SIGN = os.getenv("{{ENV_PREFIX}}_DO_SIGN", "true").strip().lower() != "false"
 
 DEFAULT_CHROME_PATHS = [
     CHROMIUM_PATH,
@@ -64,6 +73,22 @@ class CDPEnumDuck:
         return self.val
 
 
+class RuntimeContext:
+    """运行时上下文，统一管理调试目录与当前账号摘要。"""
+
+    def __init__(self, account_index: int, account_label: str):
+        self.account_index = account_index
+        self.account_label = account_label
+        self.started_at = time.time()
+        self.debug_dir = build_debug_dir(account_index, account_label)
+        self.summary: Dict[str, str] = {
+            "login": "unknown",
+            "waf": "unknown",
+            "risk": "unknown",
+            "sign": "unknown",
+        }
+
+
 async def bark_notify(title: str, body: str):
     """通过 Bark 发送推送通知。"""
     if not BARK_URL:
@@ -76,6 +101,63 @@ async def bark_notify(title: str, body: str):
         print(f"📱 Bark 通知已发送: {title}")
     except Exception as e:
         print(f"⚠️ Bark 通知发送失败: {e}")
+
+
+def now_ts() -> str:
+    """返回当前 ISO 时间戳。"""
+    return dt.datetime.now().astimezone().isoformat()
+
+
+def mask_account_label(label: str) -> str:
+    """对账号标签做最小脱敏。"""
+    if len(label) <= 7:
+        return label
+    return f"{label[:3]}***{label[-3:]}"
+
+
+def build_debug_dir(account_index: int, account_label: str) -> pathlib.Path:
+    """构造当前账号的调试目录。"""
+    root = pathlib.Path.cwd() / "debug_{{ENV_PREFIX_LOWER}}"
+    root.mkdir(parents=True, exist_ok=True)
+    suffix = mask_account_label(account_label).replace("/", "_").replace("\\", "_").replace(":", "_")
+    stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    debug_dir = root / f"{stamp}_{account_index + 1}_{suffix}"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    return debug_dir
+
+
+def cleanup_old_debug_dirs(root: pathlib.Path, retention_days: int):
+    """清理历史调试目录，避免长期占满磁盘。"""
+    if retention_days <= 0 or not root.exists():
+        return
+    deadline = time.time() - retention_days * 86400
+    for child in root.iterdir():
+        try:
+            if child.is_dir() and child.stat().st_mtime < deadline:
+                shutil.rmtree(child, ignore_errors=True)
+        except Exception as e:
+            print(f"⚠️ 清理旧调试目录失败: {child}: {e}")
+
+
+def append_jsonl(path: pathlib.Path, data: Dict):
+    """向 JSONL 文件追加一行结构化日志。"""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"ts": now_ts(), **data}
+        with path.open("a", encoding="utf-8") as fw:
+            fw.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print(f"⚠️ 写入结构化日志失败: {path.name}: {e}")
+
+
+def save_success_snapshot(debug_dir: pathlib.Path, stage: str, payload: Dict):
+    """保存成功快照，固化真实成功样本。"""
+    try:
+        path = debug_dir / f"success_snapshot_{stage}.json"
+        path.write_text(json.dumps({"ts": now_ts(), **payload}, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"💾 已固化成功快照[{stage}]: {path}")
+    except Exception as e:
+        print(f"⚠️ 保存成功快照失败[{stage}]: {e}")
 
 
 def parse_cookie_string(cookie_str: str) -> List[Dict]:
@@ -167,6 +249,46 @@ async def _wait_for_devtools(host: str, port: int, timeout: float = 20.0) -> boo
         except Exception:
             await asyncio.sleep(0.5)
     return False
+
+
+async def save_screenshot(tab, path: pathlib.Path):
+    """保存页面截图。"""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        await tab.save_screenshot(str(path))
+        print(f"📸 已保存截图: {path}")
+        return True
+    except Exception as e:
+        print(f"⚠️ 保存截图失败: {e}")
+        return False
+
+
+async def page_state(tab) -> Dict[str, str]:
+    """读取当前页面摘要，用于状态机判断。"""
+    raw = await tab.evaluate(
+        """
+        JSON.stringify((function() {
+            return {
+                url: location.href,
+                title: document.title || '',
+                text: (document.body ? document.body.innerText : '').slice(0, 600),
+                html: (document.documentElement ? document.documentElement.outerHTML : '').slice(0, 1200)
+            };
+        })())
+        """
+    )
+    try:
+        return json.loads(raw if isinstance(raw, str) else str(raw))
+    except Exception:
+        return {"url": "", "title": "", "text": str(raw)[:600], "html": ""}
+
+
+async def dump_page_state(tab, label: str):
+    """打印页面状态摘要。"""
+    state = await page_state(tab)
+    text = " ".join(str(state.get("text", "")).split())[:220]
+    print(f"{label}: url={state.get('url')}, title={state.get('title')}, text={text}")
+    return state
 
 
 async def start_browser_with_retry(chromium_path: str, use_chrome_headless: bool):
@@ -298,6 +420,12 @@ async def browser_fetch(tab, url: str, method: str = "GET", headers: Optional[Di
         return {"ok": False, "status": 0, "text": raw, "data": None}
 
 
+def summarize_fetch_result(prefix: str, result: Dict):
+    """打印浏览器内 fetch 摘要，避免误把 HTTP 200 当成功。"""
+    text = str(result.get("text") or "")[:260]
+    print(f"📌 {prefix}, ok={result.get('ok')}, status={result.get('status')}, body={text}")
+
+
 async def handle_cloudflare(tab, max_rounds=15):
     """处理基础 Cloudflare 5 秒盾。复杂场景请按站点另写专用逻辑。"""
     markers = (
@@ -326,6 +454,29 @@ async def handle_cloudflare(tab, max_rounds=15):
                 await tab.reload()
         except Exception:
             await asyncio.sleep(2)
+
+
+async def wait_login_page_ready(tab, runtime: RuntimeContext, timeout: int = 60) -> bool:
+    """等待真实登录页 DOM 就绪，不把空白页/WAF 页误判成登录页。"""
+    deadline = time.time() + timeout
+    round_no = 0
+    while time.time() < deadline:
+        round_no += 1
+        state = await page_state(tab)
+        text = state.get("text", "")
+        html = state.get("html", "")
+        looks_ready = any(word in text for word in ["登录", "密码", "手机号", "账号", "验证码"]) or any(
+            marker in html for marker in ["password", "username", "rememberme", "JSEncrypt", "geetest"]
+        )
+        if round_no == 1 or round_no % 5 == 0:
+            print(f"🧭 登录页等待第 {round_no} 轮: ready={looks_ready}, title={state.get('title')}")
+            await save_screenshot(tab, runtime.debug_dir / f"login_ready_wait_{round_no}.png")
+        if looks_ready:
+            runtime.summary["waf"] = "passed-or-not-needed"
+            return True
+        await asyncio.sleep(2)
+    runtime.summary["waf"] = "login-page-not-ready"
+    return False
 
 
 async def get_verification_site_key(tab, settings_url: str, action: str) -> str:
@@ -500,6 +651,27 @@ async def login_with_credentials(tab, username: str, password: str) -> Tuple[boo
     return False, "未实现用户名密码登录逻辑"
 
 
+async def open_login_risk_challenge(tab, runtime: RuntimeContext) -> Dict:
+    """登录风控挑战占位函数，返回挑战场景摘要。"""
+    # 中文注释：推荐在这里统一处理：
+    # - WAF / Probe 放行后登录页是否就绪
+    # - risk_level2_3 / risk_level2_4 / 点选 / 短信
+    # - 保存 canvas / overlay / trace / success snapshot
+    return {"opened": False, "scene": ""}
+
+
+async def verify_browser_session(tab) -> Dict:
+    """浏览器态登录复核占位函数。"""
+    # 中文注释：优先读用户中心页、前端状态对象、浏览器内受保护接口。
+    return {"ok": await is_logged_in(tab), "summary": "待按站点实现"}
+
+
+async def verify_api_session(tab) -> Dict:
+    """业务 API 登录复核占位函数。"""
+    # 中文注释：若站点最终业务走 App API / JSON API，必须单独复核，而不是只看页面已登录。
+    return {"ok": False, "summary": "待按站点实现"}
+
+
 async def do_sign(tab, account_index: int) -> bool:
     """执行签到动作，并在函数内部做最小结果判断。"""
     label = f"第 {account_index + 1} 个账号"
@@ -556,12 +728,25 @@ async def verify_sign_result(tab) -> str:
     return content[:200]
 
 
+async def fetch_authoritative_status(tab) -> Dict:
+    """读取权威业务状态占位函数。"""
+    # 中文注释：例如用户资料接口、签到状态接口、积分流水接口。
+    return {"ok": False, "summary": "待按站点实现"}
+
+
+async def execute_sign_action(tab) -> Dict:
+    """真正执行签到动作占位函数。"""
+    # 中文注释：推荐返回结构化结果，而不是只有 True/False。
+    return {"ok": False, "already": False, "new_sign": False, "message": "待按站点实现"}
+
+
 # ----------------------------- 主流程 -----------------------------
 async def main():
     print("=" * 60)
     print("{{SITE_TITLE}} 全自动签到脚本 (nodriver + env cookie)")
     print("=" * 60)
 
+    cleanup_old_debug_dirs(pathlib.Path.cwd() / "debug_{{ENV_PREFIX_LOWER}}", DEBUG_RETENTION_DAYS)
     cookie_accounts = load_env_cookies()
     cred_accounts = load_env_credentials()
     if not cookie_accounts and not cred_accounts:
@@ -591,12 +776,17 @@ async def main():
         account_tasks.append({"type": "password", "username": cred["username"], "password": cred["password"]})
 
     for idx, account in enumerate(account_tasks):
-        print(f"\n👤 准备处理第 {idx + 1}/{len(account_tasks)} 个账号...")
+        account_label = account["username"] if account["type"] == "password" else f"cookie_{idx + 1}"
+        runtime = RuntimeContext(idx, account_label)
+        print(f"\n👤 准备处理第 {idx + 1}/{len(account_tasks)} 个账号[{mask_account_label(account_label)}]，调试目录: {runtime.debug_dir}")
         browser = None
         try:
             browser = await start_browser_with_retry(chromium_path, use_chrome_headless)
             tab = await browser.get(BASE_URL)
             await asyncio.sleep(2)
+            await dump_page_state(tab, "📄 打开首页后")
+            await save_screenshot(tab, runtime.debug_dir / "00_open_home.png")
+            append_jsonl(runtime.debug_dir / "run_samples.jsonl", {"phase": "open", "account": runtime.account_label})
 
             if account["type"] == "cookie":
                 await inject_cookies(tab, account["cookies"])
@@ -606,16 +796,43 @@ async def main():
                     failed_accounts.append(idx + 1)
                     continue
             else:
+                login_ready = await wait_login_page_ready(tab, runtime, timeout=45)
+                if not login_ready:
+                    raise RuntimeError("登录页 DOM 未就绪，请单独实现 WAF / Probe / 登录页放行逻辑")
                 login_ok, login_message = await login_with_credentials(tab, account["username"], account["password"])
                 print(f"📄 第 {idx + 1} 个账号登录反馈: {login_message}")
+                append_jsonl(runtime.debug_dir / "run_samples.jsonl", {"phase": "login", "message": login_message[:260]})
                 if not login_ok:
                     failed_accounts.append(idx + 1)
                     continue
 
             print(f"✅ 第 {idx + 1} 个账号登录态有效。")
+            runtime.summary["login"] = "ok"
+            browser_verify = await verify_browser_session(tab)
+            print(f"🧭 浏览器态复核: {browser_verify}")
+            api_verify = await verify_api_session(tab)
+            print(f"🧭 API 复核: {api_verify}")
+            save_success_snapshot(runtime.debug_dir, "login", {"browser_verify": browser_verify, "api_verify": api_verify})
             before_preview = await fetch_status_before_action(tab)
             print(f"📄 第 {idx + 1} 个账号动作前状态: {before_preview[:200]}")
-            sign_ok = await do_sign(tab, idx)
+            auth_before = await fetch_authoritative_status(tab)
+            print(f"🧭 第 {idx + 1} 个账号权威状态(动作前): {auth_before}")
+            sign_result = await execute_sign_action(tab) if DO_SIGN else {"ok": True, "already": False, "new_sign": False, "message": "已关闭 DO_SIGN"}
+            print(f"📌 第 {idx + 1} 个账号执行动作结果: {sign_result}")
+            auth_after = await fetch_authoritative_status(tab)
+            print(f"🧭 第 {idx + 1} 个账号权威状态(动作后): {auth_after}")
+            sign_ok = bool(sign_result.get("ok"))
+            if sign_ok:
+                runtime.summary["sign"] = "new-success" if sign_result.get("new_sign") else ("already" if sign_result.get("already") else "ok")
+                save_success_snapshot(
+                    runtime.debug_dir,
+                    "sign",
+                    {"before": auth_before, "action": sign_result, "after": auth_after},
+                )
+            append_jsonl(
+                runtime.debug_dir / "run_samples.jsonl",
+                {"phase": "sign", "before": auth_before, "action": sign_result, "after": auth_after},
+            )
             after_preview = await fetch_status_after_action(tab)
             print(f"📄 第 {idx + 1} 个账号动作后状态: {after_preview[:200]}")
             verify_preview = await verify_sign_result(tab)
@@ -624,12 +841,13 @@ async def main():
                 failed_accounts.append(idx + 1)
         except Exception as e:
             print(f"❌ 第 {idx + 1} 个账号运行异常: {e}")
+            append_jsonl(runtime.debug_dir / "run_samples.jsonl", {"phase": "exception", "error": str(e)})
             await bark_notify("{{SITE_NAME}} 运行异常", str(e)[:80])
             failed_accounts.append(idx + 1)
         finally:
             if browser:
                 try:
-                    if not HEADLESS:
+                    if not HEADLESS and KEEP_DEBUG:
                         print("\n🛑 当前账号处理完毕，保持窗口开启 10 秒以便观察结果...")
                         await asyncio.sleep(10)
                     browser.stop()
