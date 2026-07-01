@@ -9,12 +9,66 @@ import re
 from pathlib import Path
 
 
+PRESET_CONFIGS = {
+    "generic": {
+        "mode": None,
+        "risk_profile": None,
+        "description": "通用站点；不主动覆盖模式与风控等级。",
+        "hints": [
+            "先确认权威成功判据，再决定 httpx 还是 nodriver。",
+        ],
+    },
+    "browser-risk": {
+        "mode": "nodriver",
+        "risk_profile": "high",
+        "description": "登录前 WAF / Probe，登录后极验或点选，最终业务走浏览器态或 App API。",
+        "hints": [
+            "先做 WAF 放行页与登录页 DOM 就绪判定，不要只看 URL。",
+            "默认保留调试目录、结构化日志、成功快照。",
+            "登录成功后做浏览器态 + API 双重复核。",
+        ],
+    },
+    "turnstile-json-api": {
+        "mode": "nodriver",
+        "risk_profile": "high",
+        "description": "Cloudflare Turnstile + 浏览器态 JSON API。",
+        "hints": [
+            "优先浏览器内 fetch，复用 Cookie / Storage / 同源环境。",
+            "优先读取公开配置接口获取 siteKey，再渲染自定义 Turnstile 组件。",
+        ],
+    },
+    "cookie-cloudflare": {
+        "mode": "nodriver",
+        "risk_profile": "standard",
+        "description": "主要依赖 Cookie 注入，但首页或状态页有 Cloudflare/简单浏览器放行。",
+        "hints": [
+            "先注入 Cookie，再访问权威页判断是否真正已登录。",
+            "若浏览器态可过、httpx 直连 403，不要强退化成 httpx。",
+        ],
+    },
+    "simple-httpx": {
+        "mode": "httpx",
+        "risk_profile": "standard",
+        "description": "接口稳定、可直连、无强浏览器依赖。",
+        "hints": [
+            "优先保持纯 httpx 闭环，避免过早引入浏览器复杂度。",
+        ],
+    },
+}
+
+
 def build_parser() -> argparse.ArgumentParser:
     """构建命令行参数解析器。"""
     parser = argparse.ArgumentParser(description="生成论坛签到脚本骨架")
     parser.add_argument("--site-name", required=True, help="站点文件名基名，例如 nodeseek 或 right")
     parser.add_argument("--site-title", help="站点展示名，默认等于 site-name")
     parser.add_argument("--mode", required=True, choices=["httpx", "nodriver"], help="脚本模式")
+    parser.add_argument(
+        "--preset",
+        default="generic",
+        choices=sorted(PRESET_CONFIGS.keys()),
+        help="站点模式预设；用于约束推荐工作流并给出生成后提示。",
+    )
     parser.add_argument(
         "--risk-profile",
         default="standard",
@@ -62,6 +116,10 @@ def build_output_path(output_dir: Path, site_name: str, mode: str) -> Path:
 def print_post_generation_hints(args, output_path: Path, env_prefix: str):
     """输出生成后的后续动作提示，减少首次建站时遗漏关键步骤。"""
     print(f"已生成脚本: {output_path}")
+    preset = PRESET_CONFIGS[args.preset]
+    print(f"预设模式：{args.preset} - {preset['description']}")
+    for idx, hint in enumerate(preset["hints"], start=1):
+        print(f"预设提示{idx}：{hint}")
     if args.mode != "nodriver":
         return
 
@@ -78,10 +136,23 @@ def print_post_generation_hints(args, output_path: Path, env_prefix: str):
         print("   - 优先实现登录页就绪判断、验证码成功快照、浏览器态/API 双重复核。")
 
 
+def apply_preset_overrides(args) -> None:
+    """根据预设覆盖或校验模式与风控等级。"""
+    preset = PRESET_CONFIGS[args.preset]
+    preset_mode = preset.get("mode")
+    preset_risk = preset.get("risk_profile")
+    if preset_mode and args.mode != preset_mode:
+        raise ValueError(f"预设 {args.preset} 要求 mode={preset_mode}，当前为 {args.mode}")
+    if preset_risk and args.risk_profile != preset_risk:
+        print(f"ℹ️ 预设 {args.preset} 自动将 risk-profile 从 {args.risk_profile} 调整为 {preset_risk}")
+        args.risk_profile = preset_risk
+
+
 def main():
     """命令行入口。"""
     parser = build_parser()
     args = parser.parse_args()
+    apply_preset_overrides(args)
 
     skill_dir = Path(__file__).resolve().parents[1]
     output_dir = Path(args.output).resolve()
