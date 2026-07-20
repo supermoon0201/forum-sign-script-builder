@@ -79,6 +79,7 @@ description: Build or extend forum/community daily sign-in scripts in Python for
 - 如果站点是 **可见 Turnstile 复选框 + hidden input 回填 + 视觉点击不稳定 + 会弹 Cloudflare 错误遮罩**，额外看 `references/turnstile-visual-recovery.md`
 - 如果站点是 **登录前 WAF / Probe，登录后再触发极验或点选，最终业务走 App API**，额外看 `references/browser-risk-sites.md`
 - 如果准备使用 `scripts/init_site_sign.py --preset ...` 生成脚本，落地前额外看 `references/preset-playbooks.md`
+- 如果是 **独立拼图块 `<img>` + Canvas 多候选槽位的平移滑块**，读取 `references/dingxiang-slider.md`
 
 ### 3. 成功判断必须保守
 
@@ -123,6 +124,8 @@ description: Build or extend forum/community daily sign-in scripts in Python for
 
 滑块 / 旋转拼图补充经验：
 
+- 对 **独立拼图块 + Canvas 多槽位**，不要计算 Canvas 中两个异常块的间距；用独立拼图块 alpha 轮廓匹配真实槽位，再计算拼图块当前中心到槽位中心的剩余 CSS 距离。完整流程见 `references/dingxiang-slider.md`。
+- CDP 拖动使用库自带 `MouseButton.LEFT` 枚举，并在按下/移动时显式传 `buttons=1`、释放时传 `buttons=0`。若事件探针只有 `mousemove` 没有可信 `mousedown`，先修事件序列，不要继续调 offset。
 - 对 **圆弧滑动 + 旋转拼图**，先逆前端运行规则：找 `guardword`/轨迹参数、滑块百分比 `p`、旋转角、轨迹圆心、拼图 CSS 尺寸和旋转中心；不要只做截图模板匹配。
 - 若用户只关心轮廓，主判据就只用轮廓：边界命中率、双向 Chamfer 距离、膨胀边界 IoU、质心距离和角度距离；不要让内部纹理相关性主导结果。
 - 截图像素与前端 CSS 像素可能不一致。用拼图截图尺寸反推 `coordinate_scale`，例如前端块为 `80px` 时，`scale=(piece_width+piece_height)/160`；旋转中心也用截图实际中心，而不是硬编码 `(40,40)`。否则 overlay 会明显滑不到槽位。

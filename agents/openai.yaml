@@ -1,4 +1,4 @@
 interface:
   display_name: "Forum Sign Builder"
-  short_description: "Build reliable forum sign scripts"
-  default_prompt: "Use -sign-script-builder to add a new site sign-in script in the current repository."
+  short_description: "Build reliable forum sign-in automation"
+  default_prompt: "Use $forum-sign-script-builder to build or debug a reliable forum sign-in script."
